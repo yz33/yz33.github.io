@@ -1,0 +1,427 @@
+---
+title: "PUBG data Anaylsis"
+author: "Youming Zhang"
+date: "5/16/2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+library(rvest)
+library(stringr)
+library(stringi)
+library(dplyr)
+library(tidyr)
+library(readr)
+library(ggplot2)
+library(ggrepel)
+library(broom)
+library(ggrepel)
+library(grid)
+library(corrplot)
+library(Amelia)
+library(plotly)
+```
+
+## Introduction
+
+  I am a gamer, so for my final project. I would like to analysis some features from a game called PlayerUknownBattleGround(PUBG) using the skills I learn from data science. This game is a survival type of game embedded with shooting, driving and running features. This game is very fascinating and made many people fell in love with it so am I. But  I am not very good at this game, so I want to find specific strategies in order to help me and other players become a pro player form data science standpoint.  I will analysis solo mode for this project. 
+	The game objective is to survive until the last.  When the game starts, 100 players join a game map. They can loot equipment from buildings including weapons. A player with better equipment and weapons will have a higher survival chance. The map will have a circle method which everyone has to stand in the circle otherwise he/she will die, so this functionality is used to increase players' encounter chance. Furthermore, the circle will get smaller and smaller. Players have to kill others to get items and supplies to survive to the last circle. 
+
+##Data Prepration
+I used is from Kaggle: PUBG Finish Placement Prediction at https://www.kaggle.com/c/pubg-finish-placement-prediction/data and I also scraped and cleaned another data set from https://pubg.op.gg/weapons where they provide a full analysis of weapons used in PUBG game. I also downloaded a kill stats from https://www.kaggle.com/skihikingkevin/pubg-match-deaths#deaths.zip in order to compare weapon effects. 
+
+###Explination of Kaggle Data
+website:https://www.kaggle.com/c/pubg-finish-placement-prediction/data
+In a PUBG game, up to 100 players start in each match (matchid). Players can be on teams (groupId) which get ranked at the end of the game (winPlacePerc) based on how many other teams are still alive when they are eliminated. In the game, players can pick up different munitions, revive downed-but-not-out (knocked) teammates, drive vehicles, swim, run, shoot, and experience all of the consequences -- such as falling too far or running themselves over and eliminating themselves.
+
+For each row contains one player's post-game stats. The data comes from matches of all types: solos, duos, squads, and custom; there is no guarantee of there being 100 players per match, nor at most 4 players per group.
+
+See Appendix for fields description.
+
+###Kill Match Stats Explination 
+This is the stats about players killed. It specifies where is the killer and where is the death to place by using a coordinate system. It also demonstrated what weapon killed the dead player. 
+
+See Appendix for fields description.
+
+###OP.GG data Explination
+website:https://pubg.op.gg/weapons
+This is the weapon statics' by performance data scraped from op.gg websites. A weapon is one of the most important equipment in PUBG game which could impact the survival rate of a player. Each weapon has its own performance data in areas such as damage, rate of fire, reload duration, body hit impact. 
+The other table I scraped is weapon statics' by usage pattern which contains the information of how a weapon is preferred by players in PUBG.
+
+See Appendix for fields description.
+
+```{r, echo = TRUE}
+#scraping the weapon data from op.gg
+url<-"https://pubg.op.gg/weapons" 
+
+url.scrap <- read_html(url)
+items <- html_nodes(x   = url.scrap, css = "li") %>% html_text()
+items<-items[1:124]
+
+#data cleaning
+preference_items<-items[49:86]%>%
+  str_remove_all(" ")%>%
+  stri_replace_all_regex("\n"," ")
+
+performance_items<-items[87:124]%>%
+  str_remove_all(" ")%>%
+  stri_replace_all_regex("\n"," ")
+
+#tidy
+string<-gsub("\\s+", " ", str_trim(preference_items))
+string<-str_sub(string,start=1L,end=-2L)
+string<-str_replace_all(string,"%","")
+string[38]<-gsub(string[38],"","DP-28 0.00 34.21 0.19 34.64")
+
+#as data frame
+tab<-as.data.frame(string)
+preference_tab<-tab%>%
+  separate(string,c("weapon","K_D","preference","spawn_rate","avg_kill_dist")," ")
+
+#replace - and 0.00 as NAs
+preference_tab[preference_tab=="-"]<-NA
+preference_tab[preference_tab=="0.00"]<-NA
+
+#convert columns' type
+preference_tab<-preference_tab%>%
+  type_convert(col_types=cols( K_D = col_double()))%>%
+  type_convert(col_types=cols( preference = col_double()))%>%
+  type_convert(col_types=cols( spawn_rate = col_double()))%>%
+  type_convert(col_types=cols( avg_kill_dist= col_double()))
+
+
+#divide preference and spawn_rate by 100
+divide_by<-function(x) x/100
+preference_tab$preference<-sapply(preference_tab$preference,divide_by)
+preference_tab$spawn_rate<-sapply(preference_tab$spawn_rate,divide_by)
+
+head(preference_tab)
+```
+
+Similarily, I will be scraping the weapon performance data from op.gg
+
+```{r, echo = TRUE}
+string<-gsub("\\s+", " ", str_trim(performance_items))
+
+p_tab<-as.data.frame(string)
+performance_tab<-p_tab%>%
+  separate(string,c("weapon","damage","rate_fire","reload_duration","body_hit_impact")," ")%>%
+  separate(rate_fire,c("rate_fire","tmp"),"s")%>%
+  separate(reload_duration,c("reload_duration","tmp"),"s")
+
+performance_tab$tmp<-NULL
+performance_tab[performance_tab=="-"]<-NA
+
+performance_tab<-performance_tab[,c("weapon","damage","rate_fire","reload_duration","body_hit_impact")]
+
+performance_tab<-performance_tab%>%
+  type_convert(col_types=cols( damage = col_integer()))%>%
+  type_convert(col_types=cols( rate_fire = col_double()))%>%
+  type_convert(col_types=cols( reload_duration = col_double()))%>%
+  type_convert(col_types=cols( body_hit_impact= col_integer()))
+
+head(performance_tab)
+
+```
+
+We can also join two tables by its weapon names to make a more sophesticate anaylsis.
+
+```{r, echo = TRUE}
+weapon_tab<-inner_join(preference_tab,performance_tab,by="weapon")
+head(weapon_tab)
+```
+
+Let's see the missingness of this data we scraped from op.gg
+```{r, echo = TRUE}
+missmap(weapon_tab)
+```
+
+Most missing data came form spawn rates. It is due to the nature of the game since some weapons in this game can only acquire from airdrop which means they are not spawnable. And some weapon is because it is so new that op.gg may not collect those data yet. Since we will not use spawn rate, such missing data have not to effect on our analysis. 
+
+###Inport Kaggle data
+
+We already had the weapon data we needed, Now lets import match data sett downloaded from Kaggle website. We will use train_V2 for our analysis and leave test data behind for the machine learning part. These data are big so it might take a while to load. Note that id, matched,and group id are encoded as hash so don't bother to decode it just leave as it is. This game has two modes, and We will analysis on solo mode. 
+
+```{r, echo = TRUE}
+train_V2 <-read_csv("~/Desktop/CMSC/CMSC320/train_V2.csv")
+test_V2 <-read_csv("~/Desktop/CMSC/CMSC320/test_V2.csv")
+```
+```{r,echo=TRUE}
+#solo data
+col<-c(1,2,3,4,5,6,7,9,10,11,12,13,14,15,16,17,18,19,21,22,23,24,25,26,27,28,29)
+col2<-c(1,2,3,4,5,6,7,9,10,11,12,13,14,15,16,17,18,19,21,22,23,24,25,26,27,28)
+solo_tab<-subset(train_V2[col],matchType=="solo"|matchType=="solo-fpp"|matchType=="normal-solo"|matchType=="normal-solo-fpp")
+solo_tab<-solo_tab%>%
+  sample_n(202013)
+```
+
+Now we have solo_tab as solo match data and group_tab as group matched data 
+
+```{r,echo=TRUE}
+#drop some unused columns and nas
+solo_tab$matchType<-NULL
+solo_tab$DBNOs<-NULL
+solo_test<-solo_tab
+solo_tab<-na.omit(solo_tab)
+head(solo_tab)
+```
+
+###Inport Kill stats
+```{r,echo = TRUE}
+kill_stat<-read_csv("~/Desktop/kill_stats.csv")
+head(kill_stat)
+```
+
+
+## Exploratory Data Analysis
+
+First, we know that weapon is one of the most important sources in order to survive in the game, so we plot weapon data first to see which weapons are favored by player. I assume higher damage weapons have higher Kill/Death rates. Therefore the player will have a higher chance to win the game when they have a better weapon. However, I need to fit a regression model and doing a hypothesis test to verify such relation. 
+Lest see the plot top 20 favored weapons first. 
+
+```{r, echo = TRUE}
+preference_tab%>%
+  arrange(desc(preference))%>%
+  top_n(20)%>%
+  ggplot(mapping=aes(x = reorder(weapon,+preference),y = preference))+
+  geom_bar(stat="identity")+
+  geom_col(fill = "Navy") +
+  geom_label_repel(aes(label = preference), size = 2.5) +
+  coord_flip() +
+  labs(title = "Top 20 Weapon Picks",
+       x = "Preference",
+       y = "Weapons")
+```
+
+```{r, echo = TRUE}
+#now plot koill match stat to see which weapons kills the most 
+kill_stat%>%
+  filter(killed_by!="Down and Out"&killed_by!="Bluezone"&killed_by!="Falling"&killed_by!="Hit by Car")%>%
+  group_by(killed_by)%>%
+  summarize(sum=n())%>%
+  arrange(desc(sum))%>%
+  top_n(20)%>%
+  ggplot(aes(x=reorder(killed_by,+sum),y=sum))+
+  geom_bar(stat="identity")+
+  coord_flip()+
+  labs(title = "Top 20 Weapon Kill",
+       x = "Sum",
+       y = "Weapons")
+```
+
+weapon kill plot matched with our weapon preference plot that there are some high preference weapons such as M416, Scar-L AKM, and M164... However, some weapons have high preference rate but do not kill that many people. Lets see what are these weapons. 
+```{r,echo = TRUE}
+weapon_tab%>%
+  ggplot(aes(x=preference,y=K_D))+
+  geom_point()+
+  labs(title="Preference Vs Kill/Death",
+       x= "Preference",
+       y = "Kill/Death")
+```
+
+We can see that these weapon's preference rates are around 60% to 75%. Lets find out more about them.
+
+```{r,echo = TRUE}
+weapon_range<-function(x){
+  if(x<20) return("short range")
+  else if(x>20 & x<50) return("middle range")
+  else if(is.null(x)) return(NA)
+  else return("long range")
+}
+#add weapon range
+preference_tab<-preference_tab%>%
+  mutate(weapon_range=sapply(avg_kill_dist,weapon_range))
+
+weapon_tab<-weapon_tab%>%
+  mutate(weapon_range=sapply(avg_kill_dist,weapon_range))
+
+weapon_tab%>%
+  filter(preference>=0.6 & preference <=0.75)%>%
+  filter(K_D<0.25)
+```
+
+High weapon preference but low in Kill/Death weapons are mostly short-range weapons which have a high spawn rate. There is one middle range weapon which has a low K/D 4%. Combined with kill stats plot, M416 by far is the most reliable weapon and highly preferable by players. So I suggest Newbie player use M416 when they have the chance to improve their win placement in this match. 
+
+###Regression Anaylsis
+
+Lets now analysis the relationship between preference and different weapon range,average kill distance and weapon damage using regression. 
+
+```{r, echo = TRUE}
+#making plot first
+preference_tab%>%
+  ggplot(aes(x = avg_kill_dist, y = preference,color=weapon_range))+
+  geom_point()+
+  geom_smooth(method=lm)+
+  labs(title = "Preference Over Kill/Death",
+       x = "Average Kill Dist in m",
+       y = "Preference")
+```
+
+Surprisingly, the middle range weapon is different from others. From the plot, we see that for short range weapons as kill distance gets longer it is more preferred. For middle range weapon as its kill distance gets longer, preference gets lower. For long-range weapons, their preference gets higher as the range gets larger. So we might need different regression for 3 different weapon ranges.
+
+_1.Short-range Weapon_
+```{r, echo = TRUE}
+#fit linear mode with these attributes
+short<-weapon_tab%>%
+  filter(weapon_range=="short range")
+fit_short<-lm(preference~avg_kill_dist+damage,data=short)
+summary(fit_short)
+```
+
+From the static analysis, we can see that the p value of damage > 5%. We can conclude that damage of a weapon does not have significance to preference whereas average kill distance has a very low p value < 5%. Therefore, we can reject the null hypothesis that the average kill distance for the short-range weapon has no relationship. 
+
+_2.Middle-range Weapon_
+```{r,echo=TRUE}
+middle<-weapon_tab%>%
+  filter(weapon_range=="middle range")
+fit_middle<-lm(preference~avg_kill_dist+damage,data=middle)
+summary(fit_middle)
+```
+
+From this statical analysis, p value for damage and average kill distance are both too high. So we can accept the null hypothesis test that for middle range weapon average kill distance and its damage has no relation with preference. The most effective middle-range weapon from the statical analysis is M416. 
+
+_2.Long-range Weapon_
+```{r,echo=TRUE}
+long<-weapon_tab%>%
+  filter(weapon_range=="long range")
+fit_long<-lm(preference~avg_kill_dist+damage,data=long)
+summary(fit_middle)
+```
+
+From the statical analysis for long range weapon, we find out that damage has a strong relationship with its preference since the p value < 5%. We can drop the null hypothesis and conclude thta as a long-range weapon's damage gets higher, its preference gets higher. It is understandable because long-range weapon are often used by snipers who favor the weapon that can kill people from hundreds of meters away by just one shot. 
+
+Weapons can be very useful when playing PUBG. However, there are some other factors that could determine the win placement in this game. We will analyze Kaggle data next. 
+
+###Heat Death Map
+
+In this part, I will generate a heat map for players to see where is the battle took place. Therefore, newbie players should avoid these areas of highly frequent fights in order to increase their survival rate. We will use Erangel as an example. 
+
+```{r, ehco = TRUE}
+library(jpeg)
+my_image=readJPEG("~/Desktop/erangel.jpg")
+set.seed(1)
+
+erangel<-kill_stat%>%
+  filter(map=="ERANGEL")%>%
+  mutate(pos_x = victim_position_x*1000/800000,
+         pos_y = victim_position_y*1000/800000)
+
+erangel%>%
+  ggplot(aes(x=pos_x,y=pos_y))+
+  annotation_custom(rasterGrob(my_image, width=unit(1,"npc"), height=unit(1,"npc")),-Inf, Inf, -Inf, Inf) +
+  stat_bin2d(alpha = 0.7, bins = 100) +
+  scale_x_continuous(expand = c(0,0)) +
+  scale_y_reverse(expand = c(0,0)) +
+  scale_fill_gradient(low = "PURPLE", high = "ORANGE", name = "the Number of Victims", labels = scales::comma, trans = "log10") +
+  labs(title="Erangel Death Heat Map",
+       x="Position X of Victim",y= "Position X of Victim")
+```
+
+
+From the heat map generated, we can see that areas around cities have a high chance of encountering with other players. Therefore, those areas have a high chance of death rate. Especially at the center of the map, players will fight with each other more often. However, at the corner of the map chances of a fight are less likely. If you want to survive till the last minute, you should avoid those areas that have a high heat level such as Military base.
+
+##Machine learning
+The last Part for this tutorial is to predict win placement by machine learning methods using Kaggle pubg data 
+
+###Correlations
+
+By finding what other variables might affect the win placement. We first need to generate a correlated plot to find out these variables. Then we can use these variables to build our machine learning models. 
+
+```{r,echo = TRUE}
+solo_cor<-cor(solo_tab[4:25])
+corrplot(solo_cor, type = "upper", tl.col = "black", tl.srt = 45,tl.cex=0.8)
+
+```
+
+
+For Solo mode, from the correlation table, we can see that boots,killPlace, walkDistance,and damage dealt have a high correlation value to winplacment, we will then use these five features to make our prediction. Now let us fit the linear regression model.
+
+```{r,ehco= TRUE}
+win_fit <- lm(winPlacePerc ~ walkDistance + killPlace + boosts+damageDealt + kills, data=solo_tab)
+summary(win_fit)
+```
+
+The dependent variable is winPlacePerc, all p values < 5%, and Adjusted R-suquared are 0.78 which means the model fits the data well for pubg in solo mode. If you want to be good at this game. Those 5 features are the deterministic attributes for you to win. It can be demonstrated that player covers more ground he will encounter more enemies and he will find more supplies and high-quality weapons we mentioned before. Therefore he will definitely have a higher chance to survive but he also has the risk to be killed by other players.
+
+
+Let's see make some predictions.
+
+```{r,echo=TRUE}
+winpredict <- predict(win_fit ,data=solo_test)
+#points(solo_tab$winPlacePerc, col = 2)
+actuals_preds <- data.frame(cbind(actuals=solo_test$winPlacePerc, predicteds=winpredict)) 
+correlation_accuracy <- cor(actuals_preds)
+correlation_accuracy 
+DMwR::regr.eval(actuals_preds$actuals, actuals_preds$predicteds)
+```
+
+Here from the correlation table, we see that our test data and prediction's data's correlation is about 88% which mean this linear model is very accurate. So we can conclude that our model fits the prediction. And the rmse is 0.14. 
+
+##Conclusion
+
+This final project is really fun for me. I applied all the skills to learn from data science such as data scraping and cleaning, data visualization, linear regression, and machine learning techniques. I also learned how to generate a heat map over an image which is intriguing. So in order to become a pro player in PUBG, you should learn how to pick a weapon. M416 is by far the most effective weapon for players to use and it can help you survive. Other factors such as kills, distance walked, boosts, and heals are also important. And it is maybe way PUBG becomes a hot game in just a short period of time. This game includes many features for players to discover and train. It is not only a shooting or survival game. To be good at it really makes players think of strategies to survive. It is also obvious from my analysis. I hope you enjoy my work and maybe download PUBG from steam and start to play to apply my suggestions and maybe find out your own way of becoming a pro!
+
+##Appendix 
+Kaggle data fields Specification:<br />
+
+$\bullet$DBNOs - Number of enemy players knocked.<br />
+$\bullet$assists - Number of enemy players this player damaged that were killed by teammates.<br />
+$\bullet$boosts - Number of boost items used.<br />
+$\bullet$damageDealt - Total damage dealt. Note: Self inflicted damage is subtracted.<br />
+$\bullet$headshotKills - Number of enemy players killed with headshots.<br />
+$\bullet$heals - Number of healing items used.<br />
+$\bullet$Id - Player’s Id<br />
+$\bullet$killPlace - Ranking in match of number of enemy players killed.<br />
+$\bullet$killPoints - Kills-based external ranking of player. (Think of this as an Elo ranking where only kills matter.) If there is a value other than -1 in rankPoints, then any 0 in killPoints should be treated as a “None”.<br />
+$\bullet$killStreaks - Max number of enemy players killed in a short amount of time.<br />
+$\bullet$kills - Number of enemy players killed.<br />
+$\bullet$longestKill - Longest distance between player and player killed at time of death. This may be misleading, as downing a player and driving away may lead to a large longestKill stat.<br />
+$\bullet$matchDuration - Duration of match in seconds.<br />
+$\bullet$matchId - ID to identify match. There are no matches that are in both the training and testing set.<br />
+$\bullet$matchType - String identifying the game mode that the data comes from. The standard modes are “solo”, “duo”, “squad”, “solo-fpp”, “duo-fpp”, and “squad-fpp”; other modes are from events or custom matches.<br />
+$\bullet$rankPoints - Elo-like ranking of player. This ranking is inconsistent and is being deprecated in the API’s next version, so use with caution. Value of -1 takes place of “None”.<br />
+$\bullet$revives - Number of times this player revived teammates.<br />
+$\bullet$rideDistance - Total distance traveled in vehicles measured in meters.<br />
+$\bullet$roadKills - Number of kills while in a vehicle.
+$\bullet$swimDistance - Total distance traveled by swimming measured in meters.<br />
+$\bullet$teamKills - Number of times this player killed a teammate.<br />
+$\bullet$vehicleDestroys - Number of vehicles destroyed.<br />
+$\bullet$walkDistance - Total distance traveled on foot measured in meters.
+weaponsAcquired - Number of weapons picked up.<br />
+$\bullet$winPoints - Win-based external ranking of player. (Think of this as an Elo ranking where only winning matters.) If there is a value other than -1 in rankPoints, then any 0 in winPoints should be treated as a “None”.<br />
+$\bullet$groupId - ID to identify a group within a match. If the same group of players plays in different matches, they will have a different groupId each time.<br />
+$\bullet$numGroups - Number of groups we have data for in the match.<br />
+$\bullet$maxPlace - Worst placement we have data for in the match. This may not match with numGroups, as sometimes the data skips over placements.<br />
+$\bullet$winPlacePerc - The target of prediction. This is a percentile winning placement, where 1 corresponds to 1st place, and 0 corresponds to last place in the match. It is calculated off of maxPlace, not numGroups, so it is possible to have missing chunks in a match.<br />
+
+Kill Stats Data:<br />
+
+$\bullet$Killed_by - the name of a wepaon which killed a player.<br />
+$\bullet$killer_name- killer name of the player.<br />
+$\bullet$killer_placement - placement of the killer<br /> 
+$\bullet$killer_position_x - position of killer in the map refers to x position in x-y coordinate<br />
+$\bullet$killer_position_y - position of killer in the map refers to y position in x-y coordinate<br />
+$\bullet$map - maps played<br />
+$\bullet$matchi_id - match id<br />
+$\bullet$time - duration of a match<br />
+$\bullet$victim_name - id of the victim<br />
+$\bullet$victim_placement - victim placement<br />
+$\bullet$victim_position_x - position of victim in the map refers to x position in x-y coordinate<br />
+$\bullet$victim_position_y - position of victim in the map refers to y position in x-y coordinate<br />
+
+Op.gg data:<br />
+
+$\bullet$weapon- name of a weapon<br />
+$\bullet$damage - weapons damage to a player<br />
+$\bullet$rate_fire - rate of fire of this weapon<br />
+$\bullet$reload_duration - time a weapon takes to reload<br />
+$\bullet$K/D - kill / death rate of a weapon<br />
+$\bullet$preference - preference rate to players.<br />
+$\bullet$spawn_rate - the probility a weapon spawns in the map.<br />
+$\bullet$avg_kill_dist - average kill distances of a weapon.<br />
+$\bullet$body_hit_impact - body impact such as shaking when bullets of a weapon hits a player.<br />
+
+Reference:<br />
+
+Kaggle https://www.kaggle.com/c/pubg-finish-placement-prediction/data<br />
+
+Op.gg  https://pubg.op.gg/weapons
